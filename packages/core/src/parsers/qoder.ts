@@ -5,11 +5,12 @@ import { sep } from 'node:path';
 
 import type { CursorsFile, QueueBucket, TokenTotals } from '../types.js';
 import {
-  qoderCliProjectsDirs,
+  qoderCliVariants,
   qoderIdeLocalDbEntries,
-  qoderWorkProjectsDirs,
+  qoderWorkVariants,
 } from '../paths.js';
 import { resolveProjectName } from '../project-name.js';
+import { peekClaudeCwd } from './claude.js';
 import { toUtcHalfHourStart } from '../queue/keys.js';
 import {
   accumulateBucket,
@@ -23,7 +24,9 @@ import { queryDbJson, readSqliteWithSnapshot } from './sqlite.js';
 export const QODER_COLLECTOR_IDE = 'qoder-ide';
 export const QODER_COLLECTOR_CN_IDE = 'qoder-cn-ide';
 export const QODER_COLLECTOR_CLI = 'qoder-cli';
+export const QODER_COLLECTOR_CN_CLI = 'qoder-cn-cli';
 export const QODER_COLLECTOR_WORK = 'qoder-work';
+export const QODER_COLLECTOR_CN_WORK = 'qoder-cn-work';
 
 interface IdeTokenInfo {
   prompt_tokens?: number;
@@ -69,6 +72,35 @@ function normalizeAnthropicUsage(u: Record<string, number>): TokenTotals | null 
   const total = computeTotalTokens(delta);
   if (total === 0) return null;
   return { ...delta, total_tokens: total, conversation_count: 1 };
+}
+
+/**
+ * Qoder CN CLI bills per request in credits: transcript usage rows carry
+ * all-zero token counts plus a `credits` amount. Count credits 1:1 as output
+ * tokens so the spend stays visible in the token-based dashboard (spend
+ * proxy — no scaling applied).
+ */
+function normalizeCreditsUsage(u: Record<string, number>): TokenTotals | null {
+  const credits = Math.max(0, Number(u.credits) || 0);
+  if (credits <= 0) return null;
+  const delta = {
+    input_tokens: 0,
+    output_tokens: credits,
+    cached_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+    reasoning_output_tokens: 0,
+  };
+  const total = computeTotalTokens(delta);
+  if (total === 0) return null;
+  return { ...delta, total_tokens: total, conversation_count: 1 };
+}
+
+/** CN CLI transcripts record internal gateway model keys (`qfmodel`). */
+function mapQoderModelName(model: string, collector: string): string {
+  if (collector === QODER_COLLECTOR_CN_CLI && model === 'qfmodel') {
+    return 'Qwen3.8-Flash';
+  }
+  return model;
 }
 
 function parseModelInfo(raw: unknown): string {
@@ -193,7 +225,12 @@ async function parseTranscriptFiles(
       const st = await stat(filePath).catch(() => null);
       if (!st?.isFile()) continue;
 
-      const project = extractProjectFromPath(filePath, projectsDir);
+      // Prefer cwd from the transcript head (folder encoding loses hyphens);
+      // fall back to the encoded-path heuristic.
+      const cwd = await peekClaudeCwd(filePath);
+      const project = cwd
+        ? resolveProjectName(cwd)
+        : extractProjectFromPath(filePath, projectsDir);
       const prev = fileCursors[filePath];
       const inode = st.ino;
       const sameInode = prev && prev.inode === inode;
@@ -239,11 +276,15 @@ async function parseTranscriptFiles(
         if (!hourStart) continue;
         if (new Date(hourStart).getTime() < sinceMs) continue;
 
-        const delta = normalizeAnthropicUsage(usage);
+        const delta =
+          normalizeAnthropicUsage(usage) ?? normalizeCreditsUsage(usage);
         if (!delta) continue;
 
         if (dedup) seenHashes.add(dedup);
-        const model = obj.message?.model ?? 'unknown';
+        const model = mapQoderModelName(
+          obj.message?.model ?? 'unknown',
+          collector,
+        );
         accumulateBucket(
           bucketState,
           'qoder',
@@ -306,27 +347,31 @@ export async function parseQoderIncremental(
     else if (existsSync(entry.dbPath)) filesProcessed += 1;
   }
 
-  const cli = await parseTranscriptFiles(
-    qoderCliProjectsDirs(),
-    QODER_COLLECTOR_CLI,
-    sinceMs,
-    seenHashes,
-    qoder.files,
-    bucketState,
-  );
-  eventsParsed += cli.eventsParsed;
-  filesProcessed += cli.filesProcessed;
+  for (const variant of qoderCliVariants()) {
+    const cli = await parseTranscriptFiles(
+      [variant.projectsDir],
+      variant.collector,
+      sinceMs,
+      seenHashes,
+      qoder.files,
+      bucketState,
+    );
+    eventsParsed += cli.eventsParsed;
+    filesProcessed += cli.filesProcessed;
+  }
 
-  const work = await parseTranscriptFiles(
-    qoderWorkProjectsDirs(),
-    QODER_COLLECTOR_WORK,
-    sinceMs,
-    seenHashes,
-    qoder.files,
-    bucketState,
-  );
-  eventsParsed += work.eventsParsed;
-  filesProcessed += work.filesProcessed;
+  for (const variant of qoderWorkVariants()) {
+    const work = await parseTranscriptFiles(
+      [variant.projectsDir],
+      variant.collector,
+      sinceMs,
+      seenHashes,
+      qoder.files,
+      bucketState,
+    );
+    eventsParsed += work.eventsParsed;
+    filesProcessed += work.filesProcessed;
+  }
 
   qoder.seenHashes = Array.from(seenHashes).slice(-50_000);
 

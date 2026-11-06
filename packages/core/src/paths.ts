@@ -453,14 +453,40 @@ export function qoderIdeLocalDbEntries(): Array<{
   }));
 }
 
-/** Qoder CLI transcript roots (`~/.qoder/projects`). */
-export function qoderCliProjectsDirs(): string[] {
-  return [join(homedir(), '.qoder', 'projects')];
+export type QoderCliVariant = {
+  collector: 'qoder-cli' | 'qoder-cn-cli';
+  projectsDir: string;
+};
+
+/** Qoder CLI homes: intl `~/.qoder` and CN `~/.qoder-cn`. */
+export function qoderCliVariants(): QoderCliVariant[] {
+  return [
+    { collector: 'qoder-cli', projectsDir: join(homedir(), '.qoder', 'projects') },
+    { collector: 'qoder-cn-cli', projectsDir: join(homedir(), '.qoder-cn', 'projects') },
+  ];
 }
 
-/** Qoder Work transcript roots (`~/.qoderwork/projects`). */
+/** Qoder CLI transcript roots (`~/.qoder/projects`, `~/.qoder-cn/projects`). */
+export function qoderCliProjectsDirs(): string[] {
+  return qoderCliVariants().map((v) => v.projectsDir);
+}
+
+export type QoderWorkVariant = {
+  collector: 'qoder-work' | 'qoder-cn-work';
+  projectsDir: string;
+};
+
+/** Qoder Work homes: intl `~/.qoderwork` and CN `~/.qoderworkcn`. */
+export function qoderWorkVariants(): QoderWorkVariant[] {
+  return [
+    { collector: 'qoder-work', projectsDir: join(homedir(), '.qoderwork', 'projects') },
+    { collector: 'qoder-cn-work', projectsDir: join(homedir(), '.qoderworkcn', 'projects') },
+  ];
+}
+
+/** Qoder Work transcript roots (`~/.qoderwork/projects`, `~/.qoderworkcn/projects`). */
 export function qoderWorkProjectsDirs(): string[] {
-  return [join(homedir(), '.qoderwork', 'projects')];
+  return qoderWorkVariants().map((v) => v.projectsDir);
 }
 
 export type TraeVariant = {
